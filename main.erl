@@ -1,7 +1,7 @@
 -module(helloworld).
 
 % main functions
--export([split/2, separateFiles/3, file_server/1, dir_service/2, start_file_server/1, start_dir_service/0, get/2, create/2, quit/1]).
+-export([partition/5, split/2, separateFiles/3, file_server/1, dir_service/2, start_file_server/1, start_dir_service/0, get/2, create/2, quit/1]).
 
 -import(util, [readFile/1,get_all_lines/1,saveFile/2]).
 
@@ -25,38 +25,41 @@ split(Fullfile, List) ->
 	end.
 
 % Map each filename to server
-partition(ServerList, FileMap, Filenames, Index) -> 
+partition(ServerList, FileMap, [HeadString | Rest], Filenames, Index) -> 
 	case Filenames of
 		[] ->
 			FileMap;
 		[ Head| Tail ] -> 
 			ServersLength = length(ServerList),
 			if
-				Index > ServerList ->
+				Index > ServersLength ->
 					NewMap = maps:put(Head, lists:nth(1,ServerList), FileMap),
-					partition(ServerList, NewMap, Tail, 2);
+					lists:nth(1,ServerList) ! {create_file, HeadString, Head},
+					partition(ServerList, NewMap, Rest, Tail, 2);
 				true -> 
 					NewMap = maps:put(Head, lists:nth(Index,ServerList), FileMap),
-					partition(ServerList, NewMap, Tail, Index + 1)
+					lists:nth(Index,ServerList) ! {create_file, HeadString, Head},
+					partition(ServerList, NewMap, Rest, Tail, Index + 1)
 			end
 	end.
 
-%create files from 64 character strings
+%create filenames from 64 character 
 create_files(SplitFile,Filename, OutputList) -> 
 	case SplitFile of
 		[] ->
 			OutputList;
 		[Head | Tail] -> 
-			File =
-	end
-	pass.
+			NewName = lists:last(string:split(Filename, "/", trailing)),
+			NewList = lists:append(OutputList, [NewName ++ "_" ++  (integer_to_list(length(OutputList)) + 1)]),
+			create_files(Tail, Filename, NewList)
+	end.
 
 %separatesFile into 64 characters each, and maps with Servers
 separateFiles(ServerList, FileMap, Filename) -> 
 	Fullfile = util:readFile(Filename),
 	SplitFile = split(Fullfile, []),
 	Filenames = create_files(SplitFile,Filename, []),
-	partition(ServerList, FileMap, Filenames, 1).
+	partition(ServerList, FileMap, SplitFile, Filenames, 1).
 
 
 dir_service(ServerList, FileMap) -> 
@@ -64,7 +67,7 @@ dir_service(ServerList, FileMap) ->
 	receive 
 	    {create_fserver, ServerPID} -> UpdatedList = lists:append(ServerList, [ServerPID]), 
 	    							    lists:sort(UpdatedList),
-	    							    file:make_dir("./servers/fs" ++ integer_to_list(length(UpdatedList))),
+	    							    ServerPID ! {make_dir, integer_to_list(length(UpdatedList))},
 	    						   	    dir_service(UpdatedList,FileMap);
 	    quit -> UpdatedList = lists:map(fun(Fserver) -> {Fserver ! quit} end, ServerList),
 	    		dir_service(UpdatedList,FileMap);
@@ -75,7 +78,12 @@ dir_service(ServerList, FileMap) ->
 
 file_server(DirUAL) -> 
 	receive 
-		create -> {direc, DirUAL} ! {create_fserver, self()}
+		create -> {direc, DirUAL} ! {create_fserver, self()},
+				   file_server(DirUAL);
+		{make_dir, Number} -> file:make_dir("./servers/fs" ++ Number),
+						      file_server(DirUAL);
+		{create_file, Contents, Filename} -> util:saveFile(Filename, Contents),
+										     file_server(DirUAL)
 	end.
 
 % when starting the Directory Service and File Servers, you will need
