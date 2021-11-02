@@ -1,7 +1,7 @@
 -module(helloworld).
 
 % main functions
--export([partition/5, split/2, separateFiles/3, file_server/1, dir_service/2, start_file_server/1, start_dir_service/0, get/2, create/2, quit/1]).
+-export([combineFiles/2, getServers/4, partition/5, split/2, separateFiles/3, file_server/2, dir_service/2, start_file_server/1, start_dir_service/0, get/2, create/2, quit/1]).
 
 -import(util, [readFile/1,get_all_lines/1,saveFile/2]).
 
@@ -19,7 +19,7 @@ split(Fullfile, List) ->
 		Length < 64 -> 
 			lists:append(List,[Fullfile]);
 		true -> 
-			First64 = lists:slice(Fullfile,0,64),
+			First64 = string:slice(Fullfile,0,64),
 			AppendList = lists:append(List,[First64]),
 			split(lists:prefix(Fullfile, First64), AppendList)
 	end.
@@ -49,8 +49,9 @@ create_files(SplitFile,Filename, OutputList) ->
 		[] ->
 			OutputList;
 		[Head | Tail] -> 
-			NewName = lists:last(string:split(Filename, "/", trailing)),
-			NewList = lists:append(OutputList, [NewName ++ "_" ++  (integer_to_list(length(OutputList)) + 1)]),
+			OnlyFileName =  lists:last(string:split(Filename, "/", trailing)),
+			WithoutTxt = lists:nth(1, string:split(OnlyFileName, ".", trailing)),
+			NewList = lists:append(OutputList, [WithoutTxt ++ "_" ++  (integer_to_list(length(OutputList)) + 1)]),
 			create_files(Tail, Filename, NewList)
 	end.
 
@@ -60,6 +61,18 @@ separateFiles(ServerList, FileMap, Filename) ->
 	SplitFile = split(Fullfile, []),
 	Filenames = create_files(SplitFile,Filename, []),
 	partition(ServerList, FileMap, SplitFile, Filenames, 1).
+
+
+getServers(Filepattern, FileMap, Servers, Index) -> 
+	Filename = Filepattern ++ integer_to_list(Index),
+	MatchedServer = maps:get(Filename, FileMap, "CANT_FIND"),
+	case MatchedServer of
+		"CANT_FIND" -> 
+			Servers;
+		X -> 
+			NewServers = lists:append(Servers, [{X, Filename}]),
+			getServers(Filepattern, FileMap, NewServers, Index + 1)
+	end.
 
 
 dir_service(ServerList, FileMap) -> 
@@ -72,18 +85,25 @@ dir_service(ServerList, FileMap) ->
 	    quit -> UpdatedList = lists:map(fun(Fserver) -> {Fserver ! quit} end, ServerList),
 	    		dir_service(UpdatedList,FileMap);
 	    {create_file, Filename} ->  NewMap = separateFiles(ServerList, FileMap, Filename),
-	    							dir_service(ServerList, NewMap)
+	    							dir_service(ServerList, NewMap);
+	    {get_file, Filename} -> WithoutTxt = lists:nth(1, string:split(Filename, ".", trailing)),
+								getServers(WithoutTxt, FileMap, [], 1),
+								dir_service(ServerList, FileMap)
+
+
 
 	end.
 
-file_server(DirUAL) -> 
+file_server(DirUAL, Path) -> 
 	receive 
 		create -> {direc, DirUAL} ! {create_fserver, self()},
-				   file_server(DirUAL);
+				   file_server(DirUAL, "");
 		{make_dir, Number} -> file:make_dir("./servers/fs" ++ Number),
-						      file_server(DirUAL);
-		{create_file, Contents, Filename} -> util:saveFile(Filename, Contents),
-										     file_server(DirUAL)
+							  NewPath = "./servers/fs" ++ Number ++ "/",
+						      file_server(DirUAL,NewPath);
+		{create_file, Contents, Filename} -> util:saveFile(Path ++ Filename ++ ".txt", Contents),
+										     file_server(DirUAL, Path);
+		{get_file, Filename} -> util:readFile(Path ++ Filename ++ ".txt")
 	end.
 
 % when starting the Directory Service and File Servers, you will need
@@ -91,8 +111,7 @@ file_server(DirUAL) ->
 
 % starts a directory service
 start_dir_service() -> 
-	KnownServers = [],
-	register(direc, spawn(helloworld, dir_service, [KnownServers])).
+	register(direc, spawn(helloworld, dir_service, [])).
 	% CODE THIS
 
 
@@ -108,16 +127,31 @@ start_file_server(DirUAL) ->
 % then requests file parts from the locations retrieved from Dir Service
 % then combines the file and saves to downloads folder
 
+combineFiles(ServersPlusFile, OutputString) ->
+	case ServersPlusFile of
+		[{Server, Filename} | Tail] ->
+			Contents = Server ! {get_file, Filename},
+			NewString = OutputString ++ Contents,
+			combineFiles(Tail, NewString);
+		[] ->
+			OutputString
+	end.
+
+
 %
 get(DirUAL, File) -> 
-	pass.
+	OnlyFileName =  lists:last(string:split(File, "/", trailing)),
+	ServersPlusFile = {direc, DirUAL} ! {get_file, File},
+	FullString = combineFiles(ServersPlusFile, ""),
+	util:saveFile("./downloads/" ++ OnlyFileName).
+
 	% CODE THIS
 
 % gives Directory Service (DirUAL) the name/contents of File to create
 % splits file into chunks of 64 characters, sends each chunk to a known file server, following alphabetical
 % round robin, for all chunks, dir server updates file meta-data to include where chunks are located
 create(DirUAL, File) ->
-	DirUAL ! File.
+	{direc, DirUAL} ! {create_file, File}.
 	% CODE THIS
 
 % sends shutdown message to the Directory Service (DirUAL)
