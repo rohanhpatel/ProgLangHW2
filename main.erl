@@ -1,7 +1,7 @@
 -module(helloworld).
 
 % main functions
--export([combineFiles/2, getServers/4, partition/5, split/2, separateFiles/3, file_server/2, dir_service/2, start_file_server/1, start_dir_service/0, get/2, create/2, quit/1]).
+-export([client/1, combineFiles/2, getServers/4, partition/5, split/2, separateFiles/3, file_server/2, dir_service/2, start_file_server/1, start_dir_service/0, get/2, create/2, quit/1]).
 
 -import(util, [readFile/1,get_all_lines/1,saveFile/2]).
 
@@ -13,8 +13,9 @@
 % grading will be those below
 
 %split into 64 character strings
+
 split(Fullfile, List) ->
-	Length = string:len(Fullfile),
+	Length = length(Fullfile),
 	if
 		Length < 64 -> 
 			lists:append(List,[Fullfile]);
@@ -25,19 +26,20 @@ split(Fullfile, List) ->
 	end.
 
 % Map each filename to server
-partition(ServerList, FileMap, [HeadString | Rest], Filenames, Index) -> 
-	case Filenames of
+partition(ServerList, FileMap, SplitFile, Filenames, Index) -> 
+	case {Filenames} of
 		[] ->
 			FileMap;
 		[ Head| Tail ] -> 
-			ServersLength = length(ServerList),
 			if
-				Index > ServersLength ->
+				Index > length(ServerList) ->
 					NewMap = maps:put(Head, lists:nth(1,ServerList), FileMap),
+					[HeadString | Rest] = SplitFile,
 					lists:nth(1,ServerList) ! {create_file, HeadString, Head},
 					partition(ServerList, NewMap, Rest, Tail, 2);
 				true -> 
 					NewMap = maps:put(Head, lists:nth(Index,ServerList), FileMap),
+					[HeadString | Rest] = SplitFile,
 					lists:nth(Index,ServerList) ! {create_file, HeadString, Head},
 					partition(ServerList, NewMap, Rest, Tail, Index + 1)
 			end
@@ -51,13 +53,13 @@ create_files(SplitFile,Filename, OutputList) ->
 		[Head | Tail] -> 
 			OnlyFileName =  lists:last(string:split(Filename, "/", trailing)),
 			WithoutTxt = lists:nth(1, string:split(OnlyFileName, ".", trailing)),
-			NewList = lists:append(OutputList, [WithoutTxt ++ "_" ++  (integer_to_list(length(OutputList)) + 1)]),
+			NewList = lists:append(OutputList, [WithoutTxt ++ "_" ++  (integer_to_list(length(OutputList) + 1))]),
 			create_files(Tail, Filename, NewList)
 	end.
 
 %separatesFile into 64 characters each, and maps with Servers
 separateFiles(ServerList, FileMap, Filename) -> 
-	Fullfile = util:readFile(Filename),
+	Fullfile = util:readFile("./input/" ++ Filename),
 	SplitFile = split(Fullfile, []),
 	Filenames = create_files(SplitFile,Filename, []),
 	partition(ServerList, FileMap, SplitFile, Filenames, 1).
@@ -86,24 +88,20 @@ dir_service(ServerList, FileMap) ->
 	    		dir_service(UpdatedList,FileMap);
 	    {create_file, Filename} ->  NewMap = separateFiles(ServerList, FileMap, Filename),
 	    							dir_service(ServerList, NewMap);
-	    {get_file, Filename} -> WithoutTxt = lists:nth(1, string:split(Filename, ".", trailing)),
-								getServers(WithoutTxt, FileMap, [], 1),
+	    {get_file, Filename, ClientPID} -> WithoutTxt = lists:nth(1, string:split(Filename, ".", trailing)),
+								ClientPID ! {receive_servers, getServers(WithoutTxt, FileMap, [], 1)},
 								dir_service(ServerList, FileMap)
-
-
-
 	end.
 
 file_server(DirUAL, Path) -> 
 	receive 
-		create -> {direc, DirUAL} ! {create_fserver, self()},
-				   file_server(DirUAL, "");
 		{make_dir, Number} -> file:make_dir("./servers/fs" ++ Number),
 							  NewPath = "./servers/fs" ++ Number ++ "/",
 						      file_server(DirUAL,NewPath);
 		{create_file, Contents, Filename} -> util:saveFile(Path ++ Filename ++ ".txt", Contents),
 										     file_server(DirUAL, Path);
-		{get_file, Filename} -> util:readFile(Path ++ Filename ++ ".txt")
+		{get_file, Filename, ClientPID} -> StringContent = util:readFile(Path ++ Filename ++ ".txt"),
+										   ClientPID ! {retrieve_content, StringContent}
 	end.
 
 % when starting the Directory Service and File Servers, you will need
@@ -111,15 +109,15 @@ file_server(DirUAL, Path) ->
 
 % starts a directory service
 start_dir_service() -> 
-	register(direc, spawn(helloworld, dir_service, [])).
+	register(direc, spawn(helloworld, dir_service, [ [] ,maps:new()])).
 	% CODE THIS
 
 
 % starts a file server with the UAL of the Directory Service
 %contacts dir service, dir service updates list of known file servers, alphabetically sorted
 start_file_server(DirUAL) -> 
-	F = spawn(helloworld, file_server, [DirUAL]),
-	F ! create.
+	F = spawn(helloworld, file_server, [DirUAL, ""]),
+	{direc, DirUAL} ! {create_fserver, F}.
 
 	% CODE THIS
 
@@ -127,23 +125,48 @@ start_file_server(DirUAL) ->
 % then requests file parts from the locations retrieved from Dir Service
 % then combines the file and saves to downloads folder
 
-combineFiles(ServersPlusFile, OutputString) ->
-	case ServersPlusFile of
-		[{Server, Filename} | Tail] ->
-			Contents = Server ! {get_file, Filename},
-			NewString = OutputString ++ Contents,
-			combineFiles(Tail, NewString);
+combineFiles(StringContent, OutputString) ->
+	case StringContent of
 		[] ->
-			OutputString
+			OutputString;
+		[Head | Tail] ->
+			NewOutput = OutputString ++ Head,
+			combineFiles(Tail, NewOutput)
 	end.
+
+contact_servers(ServersPlusFile) -> 
+	case ServersPlusFile of
+		[] ->
+			nothing;
+		[{Servers, Filename} | Tail] ->
+			Servers ! {get_file, Filename},
+			contact_servers(Tail)
+	end.
+
+	
+client(Content) ->
+	receive 
+		{get_file, File, DirUAL} -> {direc, DirUAL} ! {get_file, File, self()},
+									client(Content);
+		{receive_servers, ServersPlusFile} ->  contact_servers(ServersPlusFile),
+											   client(Content);
+		{retrieve_content, StringContent} -> NewContent = Content ++ [StringContent], 
+											 client(NewContent);
+		download_file -> FullString = combineFiles(Content, [])
+
+	end.
+
 
 
 %
 get(DirUAL, File) -> 
 	OnlyFileName =  lists:last(string:split(File, "/", trailing)),
-	ServersPlusFile = {direc, DirUAL} ! {get_file, File},
-	FullString = combineFiles(ServersPlusFile, ""),
-	util:saveFile("./downloads/" ++ OnlyFileName).
+	Client = spawn(helloworld, client, []),
+	Client ! {get_file, File, DirUAL},
+	Client ! {download_file}.
+	
+	%FullString = combineFiles(ServersPlusFile, ""),
+	%util:saveFile("./downloads/" ++ OnlyFileName).
 
 	% CODE THIS
 
